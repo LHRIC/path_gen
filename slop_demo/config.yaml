@@ -1,0 +1,20 @@
+# Path generator configuration (v2)
+resolution_mm: 0.25
+spline_tension: 0.55
+max_velocity: 320
+max_accel: 1500
+clearance_mm: 3.0
+smoothing: savgol
+window_size: 7
+param_1: 11
+param_2: 22
+param_3: 33
+param_4: 44
+param_5: 55
+param_6: 66
+param_7: 77
+param_8: 88
+param_9: 99
+param_10: 110
+param_11: 121
+param_12: 132

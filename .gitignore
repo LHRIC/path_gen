@@ -1,0 +1,11 @@
+# Large reference media (kept locally / in OneDrive, re-downloadable)
+autox_tracks/autoX_videos/
+*.kn5
+Michigan-2018-Assetto-Import/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor / macro cruft
+*.swp
