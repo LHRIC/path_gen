@@ -31,8 +31,8 @@ import spline_optimize_5 as so
 # edit the optimizer file just to re-plot a saved DOF export.
 GATES_CSV = "ref_gates_gates.csv"
 GATES_CSV = "ref_gates_2_gates.csv"
-GATES_CSV = "ref_gates_autoX.csv"
-#GATES_CSV = "ref_gates_endurance.csv"
+#GATES_CSV = "ref_gates_autoX.csv"
+GATES_CSV = "ref_gates_endurance.csv"
 # -----------------------------------------------------
 
 # ----- Initial-guess export toggle (edit this) -----
