@@ -119,7 +119,26 @@ def initial_guess(gate_points):
     combined_slope_vectors = pre_slope_vectors + post_slope_vectors
 
     guess_d1_dofs = combined_slope_vectors.flatten('F') / 2
-    guess_d2_dofs = np.zeros(gate_ct*2)
+
+    #D2 guess: weighted mean of the two neighboring D1 deltas, weighted (by whole-vector
+    #magnitude) toward whichever side is smaller -- soft version of "smaller wins": when
+    #both deltas are close in size this behaves like a plain average, when one dominates
+    #the other gets down-weighted instead of discarded outright.
+    d1_vectors = combined_slope_vectors / 2  # (gate_ct, 2), same values as guess_d1_dofs before flatten
+    delta_before = d1_vectors[1:-1] - d1_vectors[:-2]   # D1[i]   - D1[i-1]
+    delta_after  = d1_vectors[2:]   - d1_vectors[1:-1]  # D1[i+1] - D1[i]
+    mag_before = np.hypot(delta_before[:,0], delta_before[:,1])
+    mag_after  = np.hypot(delta_after[:,0], delta_after[:,1])
+    total_mag = mag_before + mag_after
+    total_mag[total_mag == 0] = 1  # both deltas zero -> weights don't matter, avoid /0
+    w_before = (mag_after / total_mag)[:,None]   # bigger neighbor magnitude -> more weight on the OTHER side
+    w_after  = (mag_before / total_mag)[:,None]
+
+    d2_vectors = np.zeros((gate_ct,2))
+    d2_vectors[1:-1] = w_before * delta_before + w_after * delta_after
+    d2_vectors[0] = d1_vectors[1] - d1_vectors[0]
+    d2_vectors[-1] = d1_vectors[-1] - d1_vectors[-2]
+    guess_d2_dofs = d2_vectors.flatten('F')
 
     return np.concat((guess_gate_position_dofs, guess_d1_dofs, guess_d2_dofs))
 

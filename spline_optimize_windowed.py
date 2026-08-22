@@ -47,9 +47,11 @@ from scipy.optimize import Bounds, minimize
 import spline_optimize_5 as so  # reuses generate_spline, curvature_obj_evaluation, bounds machinery
 
 # ----- Track used for this run (edit to switch tracks) -----
-#GATE_FILE = "ref_gates_autoX.csv"       # fast iteration while validating changes
-GATE_FILE = "ref_gates_endurance.csv"    # validated on autoX, now trying the real track
-OUTPUT_DIR = "out_endurance_windowed_test1"
+#GATE_FILE = "ref_gates_autoX.csv"
+#GATE_FILE = "ref_gates_endurance.csv"
+GATE_FILE = "ref_gates_enduranceTwist.csv"  # gates 90-140, the loop-prone stretch, D2 excluded below
+OUTPUT_DIR = "out_enduranceTwist_windowed_test1"
+#OUTPUT_DIR = "out_endurance_windowed_test1"
 #OUTPUT_DIR = "out_autoX_windowed_test1"
 # -------------------------------------------------------------
 
@@ -88,6 +90,11 @@ WINDOW_OPT_FTOL = 1e-4
 
 WINDOW_SIZE = 10
 WINDOW_OVERLAP = 2  # gates carried over frozen from the previous window
+
+# Experiment: leave D2 (2nd derivative / curvature) DOFs at their initial guess
+# (0, see initial_guess()) instead of letting the optimizer touch them. Position
+# and D1 (tangent) stay free either way.
+OPTIMIZE_D2 = False
 
 gate_ct = so.gate_ct
 
@@ -168,8 +175,15 @@ def solve_window(start, end):
             local[i] = free_vec[k]
             local[obj_len + i] = free_vec[n_free + k]
             local[obj_len * 2 + i] = free_vec[2 * n_free + k]
-            local[obj_len * 3 + i] = free_vec[3 * n_free + k]
-            local[obj_len * 4 + i] = free_vec[4 * n_free + k]
+            if OPTIMIZE_D2:
+                local[obj_len * 3 + i] = free_vec[3 * n_free + k]
+                local[obj_len * 4 + i] = free_vec[4 * n_free + k]
+            else:
+                # D2 stays at whatever it already is (the initial guess -- never
+                # written anywhere else when this window's D2 isn't a free DOF).
+                fd = get_gate_dofs(dofs, start + i)
+                local[obj_len * 3 + i] = fd[3]
+                local[obj_len * 4 + i] = fd[4]
         return local
 
     def objective(free_vec):
@@ -179,23 +193,22 @@ def solve_window(start, end):
         return value
 
     # Initial guess and bounds for the free gates, pulled from the same
-    # geometric guess / bound arrays spline_optimize_5 already built.
+    # geometric guess / bound arrays spline_optimize_5 already built. D2 is
+    # only included here when it's actually a free DOF (OPTIMIZE_D2).
     global_free_gates = [start + i for i in free_idx]
-    x0 = np.concatenate([
-        dofs[global_free_gates],
-        dofs[[gate_ct + g for g in global_free_gates]],
-        dofs[[gate_ct * 2 + g for g in global_free_gates]],
-        dofs[[gate_ct * 3 + g for g in global_free_gates]],
-        dofs[[gate_ct * 4 + g for g in global_free_gates]],
-    ])
-    lb = np.concatenate([
-        so.gate_position_dof_lb[global_free_gates],
-        [-40] * n_free, [-40] * n_free, [-1.2] * n_free, [-1.2] * n_free,
-    ])
-    ub = np.concatenate([
-        so.gate_position_dof_ub[global_free_gates],
-        [40] * n_free, [40] * n_free, [1.2] * n_free, [1.2] * n_free,
-    ])
+    x0_blocks = [dofs[global_free_gates],
+                 dofs[[gate_ct + g for g in global_free_gates]],
+                 dofs[[gate_ct * 2 + g for g in global_free_gates]]]
+    lb_blocks = [so.gate_position_dof_lb[global_free_gates], [-40] * n_free, [-40] * n_free]
+    ub_blocks = [so.gate_position_dof_ub[global_free_gates], [40] * n_free, [40] * n_free]
+    if OPTIMIZE_D2:
+        x0_blocks += [dofs[[gate_ct * 3 + g for g in global_free_gates]],
+                      dofs[[gate_ct * 4 + g for g in global_free_gates]]]
+        lb_blocks += [[-1.2] * n_free, [-1.2] * n_free]
+        ub_blocks += [[1.2] * n_free, [1.2] * n_free]
+    x0 = np.concatenate(x0_blocks)
+    lb = np.concatenate(lb_blocks)
+    ub = np.concatenate(ub_blocks)
 
     res = minimize(objective, x0, method=so.OPT_METHOD, bounds=Bounds(lb, ub),
                     options={'maxiter': WINDOW_OPT_MAXITER, 'ftol': WINDOW_OPT_FTOL, 'maxfun': so.OPT_MAXFUN})
