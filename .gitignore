@@ -7,5 +7,5 @@ Michigan-2018-Assetto-Import/
 __pycache__/
 *.pyc
 
-# Editor / macro cruft
-*.swp
+# Vim swap files (dot-prefixed). NOT *.swp -- SolidWorks macros use that too.
+.*.swp
