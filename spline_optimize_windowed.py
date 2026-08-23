@@ -7,28 +7,31 @@ because every objective-function evaluation rebuilds a spline over the whole
 track, and every gradient estimate needs ~1000 extra evaluations of that.
 
 This script instead sweeps a small window of WINDOW_SIZE gates along the
-track. Each window only optimizes the DOFs of the gates inside it; gates
-already solved by earlier windows are frozen. This works because the spline
-here (BPoly.from_derivatives with position+D1+D2 given at every gate) only
-needs the two DOFs bracketing a segment to build that segment's shape -- a
-segment never depends on gates further away. So the full-track objective is
-exactly the sum of each segment's own local integral, and solving it window by
-window is a fast, close approximation of solving everything at once.
+track. Each window optimizes ALL of its own gates -- nothing inside the
+window is frozen. This works because the spline here (BPoly.from_derivatives
+with position+D1+D2 given at every gate) only needs the two DOFs bracketing a
+segment to build that segment's shape -- a segment never depends on gates
+further away. So the full-track objective is exactly the sum of each
+segment's own local integral, and solving it window by window is a fast,
+close approximation of solving everything at once.
 
 Window layout (gates [start, end), window_len = end - start):
-  - WINDOW_OVERLAP gates at the start are FROZEN (already solved by the
-    previous window) -- carried along only so the free gates have the right
-    boundary conditions to connect to smoothly. Except the very first window,
-    which has nothing before it, so nothing is frozen there.
-  - The remaining gates in the window are FREE (being optimized).
-  - One more gate past `end` is also read in (frozen, not yet solved) and
-    included in the objective only -- not as a free variable -- so the
-    objective sees the segment the free gates' last DOF actually connects to.
-    Except the very last window, which has nothing after it, so there's
-    nothing to look ahead at.
-  - If a leftover window at the end of the track has zero free gates (the
-    whole thing is eaten by the overlap), it's skipped -- there's nothing to
-    optimize, and those gates are already correct from the previous window.
+  - Every gate in [start, end) is FREE (being optimized), every time a window
+    touches it -- including gates an earlier, overlapping window already
+    solved. WINDOW_STEP < WINDOW_SIZE means consecutive windows overlap and
+    the shared gates get re-optimized with better information (what's ahead
+    of them), instead of being permanently frozen after one pass. Set
+    WINDOW_STEP = WINDOW_SIZE for the old non-overlapping behavior.
+  - One gate before `start` and one gate after `end` are also read in
+    (frozen, not yet re-solved) and included in the objective only -- not as
+    free variables -- so the objective sees the segments the window's first
+    and last free gates actually connect to. Neither exists at the very
+    first/last window, since there's nothing there.
+  - The last window of the sweep is pulled back (its start shifted earlier)
+    so it's still exactly WINDOW_SIZE gates, rather than being left short
+    when (gate_ct - start) doesn't divide evenly by WINDOW_STEP. This means
+    the final step's overlap with the previous window can be larger than
+    WINDOW_STEP.
 
 Runs unattended: no plt.show() windows. Results are saved straight to a PNG
 map plot and an opt_dofs_*.npy (same flat format spline_optimize_5 writes, so
@@ -49,10 +52,14 @@ import spline_optimize_5 as so  # reuses generate_spline, curvature_obj_evaluati
 # ----- Track used for this run (edit to switch tracks) -----
 #GATE_FILE = "ref_gates_autoX.csv"
 #GATE_FILE = "ref_gates_endurance.csv"
-GATE_FILE = "ref_gates_enduranceTwist.csv"  # gates 90-140, the loop-prone stretch, D2 excluded below
-OUTPUT_DIR = "out_enduranceTwist_windowed_test1"
+#GATE_FILE = "ref_gates_enduranceTwist.csv"  # gates 104-170, the loop-prone stretch (re-cut after CAD re-spacing)
+#GATE_FILE = "ref_gates_gates.csv"  # 6-gate initial test track
+GATE_FILE = "ref_less_gates_twist.csv"  # gates 64-102 of ref_less_gates.csv -- same loop-prone stretch, mapped onto the gate-reduced 2019 track
+#OUTPUT_DIR = "out_enduranceTwist_windowed_test1"
 #OUTPUT_DIR = "out_endurance_windowed_test1"
 #OUTPUT_DIR = "out_autoX_windowed_test1"
+#OUTPUT_DIR = "out_gates_windowed_test1"
+OUTPUT_DIR = "out_less_gates_twist_w6s3"
 # -------------------------------------------------------------
 
 # spline_optimize_5.py loads its own hardcoded FILENAME (endurance) at import.
@@ -88,13 +95,13 @@ so.OBJ_FUN_INTEGRATION_EPSABS = 1e-2
 WINDOW_OPT_MAXITER = 100
 WINDOW_OPT_FTOL = 1e-4
 
-WINDOW_SIZE = 10
-WINDOW_OVERLAP = 2  # gates carried over frozen from the previous window
+WINDOW_SIZE = 6
+WINDOW_STEP = 3  # how far the window slides each pass; overlap = WINDOW_SIZE - WINDOW_STEP
 
 # Experiment: leave D2 (2nd derivative / curvature) DOFs at their initial guess
 # (0, see initial_guess()) instead of letting the optimizer touch them. Position
 # and D1 (tangent) stay free either way.
-OPTIMIZE_D2 = False
+OPTIMIZE_D2 = True
 
 gate_ct = so.gate_ct
 
@@ -132,36 +139,34 @@ def set_window_dofs(dofs, start, window_len, local_dofs):
 
 
 def solve_window(start, end):
-    """Optimize the free gates in [start, end). WINDOW_OVERLAP gates at the
-    front are frozen (already solved by the previous window) unless this is
-    the first window (nothing precedes it, so nothing is frozen). One gate
-    past `end` is also read in frozen, for the objective only, unless this is
-    the last window (nothing follows it, so there's nothing to look ahead at).
-
-    Returns (None, None) if there are no free gates to optimize (the leftover
-    at the end of the track was entirely eaten by the overlap) -- caller
-    should just stop, those gates are already correct from the last window.
+    """Optimize ALL gates in [start, end) together -- nothing in the window is
+    frozen, even if an earlier, overlapping window already solved some of
+    them. One gate before `start` and one gate after `end` are also read in
+    (frozen, for the objective only), unless this is the first/last window
+    and there's nothing there to read.
     """
     window_len = end - start
-    lead_fixed_count = WINDOW_OVERLAP if start > 0 else 0
-    has_lookahead = end < gate_ct
-    obj_len = window_len + (1 if has_lookahead else 0)
+    has_pre = start > 0
+    has_post = end < gate_ct
+    pre_offset = 1 if has_pre else 0
+    obj_len = window_len + pre_offset + (1 if has_post else 0)
 
-    gate_slice = (so.imported_gate_points[start:end + 1] if has_lookahead
-                  else so.imported_gate_points[start:end])
+    slice_start = start - 1 if has_pre else start
+    slice_end = end + 1 if has_post else end
+    gate_slice = so.imported_gate_points[slice_start:slice_end]
 
-    fixed_locals = list(range(lead_fixed_count))
-    fixed_globals = [start + i for i in fixed_locals]
-    if has_lookahead:
-        fixed_locals.append(window_len)  # last slot in the local spline
+    fixed_locals = []
+    fixed_globals = []
+    if has_pre:
+        fixed_locals.append(0)
+        fixed_globals.append(start - 1)
+    if has_post:
+        fixed_locals.append(obj_len - 1)
         fixed_globals.append(end)
     fixed_dofs_list = [get_gate_dofs(dofs, g) for g in fixed_globals]
 
-    free_idx = [i for i in range(window_len) if i not in fixed_locals]
-    n_free = len(free_idx)
-
-    if n_free == 0:
-        return None, None
+    free_idx = list(range(pre_offset, pre_offset + window_len))  # every window gate is free
+    n_free = window_len
 
     def assemble(free_vec):
         local = np.zeros(obj_len * 5)
@@ -179,9 +184,9 @@ def solve_window(start, end):
                 local[obj_len * 3 + i] = free_vec[3 * n_free + k]
                 local[obj_len * 4 + i] = free_vec[4 * n_free + k]
             else:
-                # D2 stays at whatever it already is (the initial guess -- never
-                # written anywhere else when this window's D2 isn't a free DOF).
-                fd = get_gate_dofs(dofs, start + i)
+                # D2 stays at whatever it already is (the initial guess, or a
+                # previous window's answer if this gate was touched before).
+                fd = get_gate_dofs(dofs, start + (i - pre_offset))
                 local[obj_len * 3 + i] = fd[3]
                 local[obj_len * 4 + i] = fd[4]
         return local
@@ -193,9 +198,11 @@ def solve_window(start, end):
         return value
 
     # Initial guess and bounds for the free gates, pulled from the same
-    # geometric guess / bound arrays spline_optimize_5 already built. D2 is
-    # only included here when it's actually a free DOF (OPTIMIZE_D2).
-    global_free_gates = [start + i for i in free_idx]
+    # geometric guess / bound arrays spline_optimize_5 already built -- if a
+    # gate was solved by an earlier overlapping window, this is that answer,
+    # not the original geometric guess. D2 is only included here when it's
+    # actually a free DOF (OPTIMIZE_D2).
+    global_free_gates = list(range(start, end))
     x0_blocks = [dofs[global_free_gates],
                  dofs[[gate_ct + g for g in global_free_gates]],
                  dofs[[gate_ct * 2 + g for g in global_free_gates]]]
@@ -204,8 +211,8 @@ def solve_window(start, end):
     if OPTIMIZE_D2:
         x0_blocks += [dofs[[gate_ct * 3 + g for g in global_free_gates]],
                       dofs[[gate_ct * 4 + g for g in global_free_gates]]]
-        lb_blocks += [[-1.2] * n_free, [-1.2] * n_free]
-        ub_blocks += [[1.2] * n_free, [1.2] * n_free]
+        lb_blocks += [[-10] * n_free, [-10] * n_free]
+        ub_blocks += [[10] * n_free, [10] * n_free]
     x0 = np.concatenate(x0_blocks)
     lb = np.concatenate(lb_blocks)
     ub = np.concatenate(ub_blocks)
@@ -213,16 +220,17 @@ def solve_window(start, end):
     res = minimize(objective, x0, method=so.OPT_METHOD, bounds=Bounds(lb, ub),
                     options={'maxiter': WINDOW_OPT_MAXITER, 'ftol': WINDOW_OPT_FTOL, 'maxfun': so.OPT_MAXFUN})
 
-    # Only commit the window_len gates this window owns -- the lookahead gate
-    # (if any) was only borrowed to shape the objective; it stays frozen and
-    # gets properly solved by its own future window.
+    # Commit the window_len gates this window owns -- the pre/post context
+    # gates (if any) were only borrowed to shape the objective; they aren't
+    # written back here (the pre gate keeps its previous answer, the post
+    # gate gets properly solved when its own window comes around).
     full_local = assemble(res.x)
     committed = np.concatenate([
-        full_local[0:window_len],
-        full_local[obj_len:obj_len + window_len],
-        full_local[obj_len * 2:obj_len * 2 + window_len],
-        full_local[obj_len * 3:obj_len * 3 + window_len],
-        full_local[obj_len * 4:obj_len * 4 + window_len],
+        full_local[pre_offset:pre_offset + window_len],
+        full_local[obj_len + pre_offset:obj_len + pre_offset + window_len],
+        full_local[obj_len * 2 + pre_offset:obj_len * 2 + pre_offset + window_len],
+        full_local[obj_len * 3 + pre_offset:obj_len * 3 + pre_offset + window_len],
+        full_local[obj_len * 4 + pre_offset:obj_len * 4 + pre_offset + window_len],
     ])
     return committed, res.fun
 
@@ -230,16 +238,17 @@ def solve_window(start, end):
 # ----- Sweep the whole track -----
 sweep_start_time = time.perf_counter()
 start = resume_start
-window_num = start // (WINDOW_SIZE - WINDOW_OVERLAP)  # roughly which window we're resuming at, for the printed count
+window_num = start // WINDOW_STEP  # roughly which window we're resuming at, for the printed count
 while start < gate_ct - 1:
-    end = min(start + WINDOW_SIZE, gate_ct)
+    end = start + WINDOW_SIZE
+    if end >= gate_ct:
+        # Last window of the sweep: pull it back so it's still a full
+        # WINDOW_SIZE gates instead of being left short.
+        end = gate_ct
+        start = max(0, end - WINDOW_SIZE)
     window_num += 1
     t0 = time.perf_counter()
     local_dofs, obj_val = solve_window(start, end)
-    if local_dofs is None:
-        print(f"window {window_num}: gates [{start},{end}) skipped -- no free DOFs "
-              f"(leftover fully covered by the overlap)", flush=True)
-        break
     set_window_dofs(dofs, start, end - start, local_dofs)
     print(f"window {window_num}: gates [{start},{end}) obj={obj_val:.6f} "
           f"time={time.perf_counter() - t0:.1f}s", flush=True)
@@ -247,7 +256,7 @@ while start < gate_ct - 1:
         np.savez(CHECKPOINT_PATH, dofs=dofs, next_start=end)  # so a crash before the
         start = end                                           # final save can still resume
         break
-    start = end - WINDOW_OVERLAP
+    start += WINDOW_STEP
     np.savez(CHECKPOINT_PATH, dofs=dofs, next_start=start)
 
 # Sweep finished -- the checkpoint is no longer needed (a fresh run of this

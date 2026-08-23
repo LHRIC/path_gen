@@ -1,4 +1,12 @@
-﻿import os
+﻿"""
+Copy of spline_optimize_5.py that replaces the fixed D1/D2 bound arrays with
+per-DOF bounds centered on the windowed warm-start guess (GUESS_DOF_FILE),
+to test whether tightly bounding the global optimizer around a good windowed
+initial guess reaches a comparable result faster than the fully unconstrained
+global run. Gate-position DOF bounds are untouched (still trackwidth/clearance
+based). Everything else is identical to spline_optimize_5.py.
+"""
+import os
 import sys
 import matplotlib.pyplot as plt
 import numpy as np
@@ -65,6 +73,7 @@ OUTPUT_DIR = "outputs"
 #OUTPUT_DIR = "out_endurance_test1"
 OUTPUT_DIR = "out_enduranceTwist_global_test1"
 OUTPUT_DIR = "out_less_gates_twist_global_test1"
+OUTPUT_DIR = "out_less_gates_twist_bounded_test1"
 
 SAVE_DOF_HISTORY = True # if True, also save the per-iteration DOF history with the report
 
@@ -162,15 +171,25 @@ for i in range(gate_ct):
     gate_position_dof_lb[i] = 0 + normalized_offset
     gate_position_dof_ub[i] = 1 - normalized_offset
 
-d1_dof_lb = [-80]*gate_ct*2
-d1_dof_ub = [80]*gate_ct*2
-d2_dof_lb = [-20]*gate_ct*2
-d2_dof_ub = [20]*gate_ct*2
+#D1/D2 bounded per-DOF around the windowed warm-start guess (guess_dofs), instead
+#of a fixed range for every DOF: half_width = max(floor, pct * |guess value|), so
+#DOFs with a small guess still get at least the floor of wiggle room, and DOFs
+#with a large guess get a wider range scaled to their own magnitude.
+D1_BOUND_FLOOR = 1.5
+D1_BOUND_PCT = 0.7
+D2_BOUND_FLOOR = 0.5
+D2_BOUND_PCT = 0.2
 
-#d1_dof_lb = [-np.inf]*gate_ct*2
-#d1_dof_ub = [np.inf]*gate_ct*2
-#d2_dof_lb = [-np.inf]*gate_ct*2
-#d2_dof_ub = [np.inf]*gate_ct*2
+d1_guess = guess_dofs[gate_ct:gate_ct*3]
+d2_guess = guess_dofs[gate_ct*3:gate_ct*5]
+
+d1_halfwidth = np.maximum(D1_BOUND_FLOOR, np.abs(d1_guess) * D1_BOUND_PCT)
+d2_halfwidth = np.maximum(D2_BOUND_FLOOR, np.abs(d2_guess) * D2_BOUND_PCT)
+
+d1_dof_lb = d1_guess - d1_halfwidth
+d1_dof_ub = d1_guess + d1_halfwidth
+d2_dof_lb = d2_guess - d2_halfwidth
+d2_dof_ub = d2_guess + d2_halfwidth
 
 lb = np.concat([gate_position_dof_lb, d1_dof_lb, d2_dof_lb])
 ub = np.concat([gate_position_dof_ub, d1_dof_ub, d2_dof_ub])
